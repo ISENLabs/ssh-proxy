@@ -2,6 +2,7 @@ import paramiko
 import socket
 import threading
 import logging
+import mariadb
 from proxy_session import ProxySession
 from config import *
 
@@ -15,13 +16,38 @@ class SSHProxy(paramiko.ServerInterface):
         try:
             vm_id, real_username = username.split('-', 1)
             vm_id = int(vm_id)
-            # TODO: Get VM IP from DB
-            # but poc, so hardcoded IP
-            if vm_id == 22:
-                self.target_ip = "127.0.0.1"
-                self.target_username = real_username
-                self.target_password = password
-                return paramiko.AUTH_SUCCESSFUL
+
+            conn = mariadb.connect(
+                host = DB_HOST,
+                port = DB_PORT,
+                user = DB_USERNAME,
+                password = DB_PASSWORD,
+                database = DB_NAME
+            )
+
+            try:
+                cursor = conn.cursor()
+                request = "SELECT internal_ip FROM volum_vms WHERE ctid=?"
+                cursor.execute(request, (vm_id,))
+                row = cursor.fetchone()
+
+                if row is None:
+                    logging.error(f"Error in getting internal ip: ip for vm {vm_id} is null")
+                    return paramiko.AUTH_FAILED
+
+                self.target_ip = row[0]
+            except Exception as e:
+                logging.error(f"Error in getting internal ip: {e}")
+                return paramiko.AUTH_FAILED
+            finally:
+                conn.close();
+
+            self.target_username = real_username
+            self.target_password = password
+            self.target_vm_id = vm_id
+            
+            return paramiko.AUTH_SUCCESSFUL
+            
         except ValueError:
             pass
         return paramiko.AUTH_FAILED

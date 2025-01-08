@@ -1,6 +1,7 @@
 import paramiko
 import threading
 import logging
+import mariadb
 from time import sleep
 from datetime import datetime
 from config import *
@@ -10,6 +11,28 @@ class ProxySession(threading.Thread):
         threading.Thread.__init__(self)
         self.client_sock = client_sock
         self.client_ip = client_ip
+
+    def log_cmd(self, command):
+        conn = mariadb.connect(
+            host = DB_HOST,
+            port = DB_PORT,
+            user = DB_USERNAME,
+            password = DB_PASSWORD,
+            database = DB_NAME
+        )
+
+        try:
+            cursor = conn.cursor()
+            request = "INSERT INTO volum_ssh_logs(vm_id, username, command) VALUES(?,?,?)";
+            for i in range(0, len(command), MAX_COMMAND_LENGTH):
+                chunk = command[i:i + MAX_COMMAND_LENGTH]
+                cursor.execute(request, (self.client_vm_id, self.client_username, chunk))
+            conn.commit()
+        except Exception as e:
+            logging.error(f"Error in database logging: {e}")
+        finally:
+            conn.close();
+
         
     def setup_session_logging(self, vm_id, username):
         # Setup logigng
@@ -57,8 +80,11 @@ class ProxySession(threading.Thread):
                 server.target_ip,
                 username=server.target_username,
                 password=server.target_password,
-                port=23
+                port=22
             )
+
+            self.client_username = server.target_username
+            self.client_vm_id = server.target_vm_id
 
             # Get channels
             chan = transport.accept(20)
@@ -97,7 +123,7 @@ class ProxySession(threading.Thread):
                         buff += char
 
                         if char == '\n' or char == '\r':
-                            print(f"!_ {buff}")
+                            self.log_cmd(buff);
                             lines = buff.split('\n')
                             buff = "" # Clear buffer
                             for line in lines[:-1]:
