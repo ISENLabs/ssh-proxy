@@ -8,5 +8,6 @@ At end-user connection, the proxy will act as an SSH Server. It's needed to obta
 - `pip3 install -r requirements.txt`
 - Create the DB and put basic informations innit
 - Edit the config.py
+- Generate an RSA keypair: `ssh-keygen -t rsa -f ssh_host_rsa_key`
 - Run the proxy: `python3 proxy.py`
 - Connect to the proxy: `ssh <id>-<user>@proxyip`. Example: `ssh 8-debian@127.0.0.1`
