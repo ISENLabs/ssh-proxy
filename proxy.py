@@ -7,9 +7,10 @@ from proxy_session import ProxySession
 from config import *
 
 class SSHProxy(paramiko.ServerInterface):
-    def __init__(self, client_ip):
+    def __init__(self, client_ip, db_connection):
         self.client_ip = client_ip
         self.event = threading.Event()
+        self.db_connection = db_connection
 
     def check_auth_password(self, username, password):
         print(f"Checking auth for {username}")
@@ -17,16 +18,8 @@ class SSHProxy(paramiko.ServerInterface):
             vm_id, real_username = username.split('-', 1)
             vm_id = int(vm_id)
 
-            conn = mariadb.connect(
-                host = DB_HOST,
-                port = DB_PORT,
-                user = DB_USERNAME,
-                password = DB_PASSWORD,
-                database = DB_NAME
-            )
-
             try:
-                cursor = conn.cursor()
+                cursor = self.db_connection.cursor()
                 request = "SELECT internal_ip FROM volum_vms WHERE ctid=?"
                 cursor.execute(request, (vm_id,))
                 row = cursor.fetchone()
@@ -39,8 +32,6 @@ class SSHProxy(paramiko.ServerInterface):
             except Exception as e:
                 logging.error(f"Error in getting internal ip: {e}")
                 return paramiko.AUTH_FAILED
-            finally:
-                conn.close();
 
             self.target_username = real_username
             self.target_password = password

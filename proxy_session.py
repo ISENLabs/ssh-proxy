@@ -11,27 +11,28 @@ class ProxySession(threading.Thread):
         threading.Thread.__init__(self)
         self.client_sock = client_sock
         self.client_ip = client_ip
-
-    def log_cmd(self, command):
-        conn = mariadb.connect(
+        self.db_connection = mariadb.connect(
             host = DB_HOST,
             port = DB_PORT,
             user = DB_USERNAME,
             password = DB_PASSWORD,
             database = DB_NAME
         )
+        
+    def __del__(self):
+        if self.db_connection:
+            self.db_connection.close();
 
+    def log_cmd(self, command):
         try:
-            cursor = conn.cursor()
+            cursor = self.db_connection.cursor()
             request = "INSERT INTO volum_ssh_logs(vm_id, username, command) VALUES(?,?,?)";
             for i in range(0, len(command), MAX_COMMAND_LENGTH):
                 chunk = command[i:i + MAX_COMMAND_LENGTH]
                 cursor.execute(request, (self.client_vm_id, self.client_username, chunk))
-            conn.commit()
+            self.db_connection.commit()
         except Exception as e:
             logging.error(f"Error in database logging: {e}")
-        finally:
-            conn.close();
 
         
     def setup_session_logging(self, vm_id, username):
@@ -56,7 +57,7 @@ class ProxySession(threading.Thread):
             transport.add_server_key(server_key)
             
             # Create a new SSH server interface for this session
-            server = SSHProxy(self.client_ip)
+            server = SSHProxy(self.client_ip, self.db_connection)
             
             try:
                 transport.start_server(server=server)
@@ -123,15 +124,15 @@ class ProxySession(threading.Thread):
                         buff += char
 
                         if char == '\n' or char == '\r':
-                            self.log_cmd(buff);
-                            lines = buff.split('\n')
+                            lines = buff.replace('\r', '\n').split('\n')
                             buff = "" # Clear buffer
-                            for line in lines[:-1]:
+                            for line in lines:
                                 line = line.strip()
                                 if line:  # Don't log empty lines
+                                    self.log_cmd(line);
                                     self.session_logger.info(f"Command: {line}")
-                                    # Afficher aussi dans la console
-                                    print(f"\033[93m[{datetime.now()}] User command: {line}\033[0m")
+                                    # Hide this because of session_logger that already print cmd in terminal
+                                    # print(f"\033[93m[{datetime.now()}] User command: {line}\033[0m")
                     except UnicodeDecodeError:
                         pass
                         
