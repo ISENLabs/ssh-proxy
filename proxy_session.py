@@ -134,6 +134,13 @@ class ProxySession(threading.Thread):
                     # Try to decode and log command when newline is detected
                     try:
                         char = data.decode('utf-8')
+                        
+                        # Handle Ctrl+C to clear buffer
+                        if char == '\x03':  # ^C character
+                            buff = ''
+                            destination.send(data)
+                            continue
+                            
                         buff += char
 
                         if char == '\n' or char == '\r':
