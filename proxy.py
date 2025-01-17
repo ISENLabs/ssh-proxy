@@ -53,9 +53,6 @@ class SSHProxy(paramiko.ServerInterface):
         self.event.set()
         return True
 
-    def check_channel_pty_request(self, _, _2, _3, _4, _5, _6, _7):
-        return True
-
 def start_server():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

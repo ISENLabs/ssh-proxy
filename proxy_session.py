@@ -11,6 +11,9 @@ class ProxySession(threading.Thread):
         threading.Thread.__init__(self)
         self.client_sock = client_sock
         self.client_ip = client_ip
+        self.term = None
+        self.width = 80
+        self.height = 24
         self.db_connection = mariadb.connect(
             host = DB_HOST,
             port = DB_PORT,
@@ -47,17 +50,30 @@ class ProxySession(threading.Thread):
         
         self.session_logger.info(f"New SSH session from {self.client_ip}")
 
+    def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
+        self.term = term
+        self.width = width
+        self.height = height
+        return True
+
+    def check_channel_window_change_request(self, channel, width, height, pixelwidth, pixelheight):
+        self.width = width
+        self.height = height
+        if hasattr(self, 'target_chan'):
+            self.target_chan.resize_pty(width=width, height=height)
+        return True
+
     def run(self):
-        from proxy import SSHProxy # Avoid circular import
+        from proxy import SSHProxy
         try:
             transport = paramiko.Transport(self.client_sock)
             
-            # Load the server's private key for SSH authentication
             server_key = paramiko.RSAKey.from_private_key_file(SERVER_KEY_FILE)
             transport.add_server_key(server_key)
             
-            # Create a new SSH server interface for this session
             server = SSHProxy(self.client_ip, self.db_connection)
+            server.check_channel_pty_request = self.check_channel_pty_request
+            server.check_channel_window_change_request = self.check_channel_window_change_request
             
             try:
                 transport.start_server(server=server)
@@ -65,16 +81,12 @@ class ProxySession(threading.Thread):
                 logging.error(f"SSH negotiation failed: {e}")
                 return
             
-            # Wait for auth
-            # TODO: This will need to be changed for a *clean* implementation
-            server.event.wait(30) # 30s to login
+            server.event.wait(30)
             if not server.event.is_set():
                 logging.error("Client never asked for a shell")
-                # Write error
                 transport.close()
                 return
 
-            # Connect to target VM
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(
@@ -87,22 +99,23 @@ class ProxySession(threading.Thread):
             self.client_username = server.target_username
             self.client_vm_id = server.target_vm_id
 
-            # Get channels
             chan = transport.accept(20)
             if chan is None:
                 logging.error("No channel.")
                 return
             
-            target_chan = client.get_transport().open_session()
-            target_chan.get_pty()
-            target_chan.invoke_shell()
-            
-            # Setup logging
-            vm_id = server.target_ip.split('.')[-1]  # Get last octet as VM ID for PoC
+            self.target_chan = client.get_transport().open_session()
+            self.target_chan.get_pty(
+                term=self.term or 'xterm',
+                width=self.width,
+                height=self.height
+            )
+            self.target_chan.invoke_shell()
+
+            vm_id = server.target_ip.split('.')[-1]
             self.setup_session_logging(vm_id, server.target_username)
             
-            # Start bidirectional forwarding
-            self.forward_streams(chan, target_chan)
+            self.forward_streams(chan, self.target_chan)
             
         except Exception as e:
             logging.error(f"Error in proxy session: {e}")
