@@ -2,7 +2,6 @@ import paramiko
 import threading
 import logging
 import mariadb
-from time import sleep
 from datetime import datetime
 from config import *
 
@@ -24,22 +23,18 @@ class ProxySession(threading.Thread):
         
     def __del__(self):
         if self.db_connection:
-            self.db_connection.close();
+            self.db_connection.close()
 
     def log_cmd(self, command):
         try:
             cursor = self.db_connection.cursor()
-            request = "INSERT INTO volum_ssh_logs(vm_id, username, command) VALUES(?,?,?)";
-            for i in range(0, len(command), MAX_COMMAND_LENGTH):
-                chunk = command[i:i + MAX_COMMAND_LENGTH]
-                cursor.execute(request, (self.client_vm_id, self.client_username, chunk))
+            request = "INSERT INTO volum_ssh_logs(vm_id, username, command) VALUES(?,?,?)"
+            cursor.execute(request, (self.client_vm_id, self.client_username, command))
             self.db_connection.commit()
         except Exception as e:
             logging.error(f"Error in database logging: {e}")
 
-        
     def setup_session_logging(self, vm_id, username):
-        # Setup logigng
         log_filename = f"logs/ssh_{vm_id}_{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         self.session_logger = logging.getLogger(f"ssh_session_{vm_id}_{username}")
         self.session_logger.setLevel(logging.INFO)
@@ -63,9 +58,134 @@ class ProxySession(threading.Thread):
             self.target_chan.resize_pty(width=width, height=height)
         return True
 
-    def run(self):
-        from proxy import SSHProxy
+    def handle_sftp_session(self, channel, server):
         try:
+            target_client = paramiko.SSHClient()
+            target_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            target_client.connect(
+                hostname=server.target_ip,
+                username=server.target_username,
+                password=server.target_password,
+                port=TARGET_SSH_PORT,
+                look_for_keys=False,
+                allow_agent=False
+            )
+
+            target_channel = target_client.get_transport().open_session()
+            target_channel.invoke_subsystem('sftp')
+
+            while True:
+                if channel.recv_ready():
+                    data = channel.recv(32768)
+                    if not data:
+                        break
+                    target_channel.send(data)
+
+                if target_channel.recv_ready():
+                    data = target_channel.recv(32768)
+                    if not data:
+                        break
+                    channel.send(data)
+
+                if target_channel.recv_stderr_ready():
+                    data = target_channel.recv_stderr(32768)
+                    if data:
+                        channel.send_stderr(data)
+
+                if channel.exit_status_ready():
+                    break
+
+                
+
+        except Exception as e:
+            if not channel.exit_status_ready():
+                channel.send_exit_status(1)
+        finally:
+            if target_client:
+                target_client.close()
+            return True
+
+    def handle_scp_session(self, channel, command, server):
+        target_client = None
+        try:
+            
+            target_client = paramiko.SSHClient()
+            target_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            target_client.connect(
+                hostname=server.target_ip,
+                username=server.target_username,
+                password=server.target_password,
+                port=TARGET_SSH_PORT,
+                look_for_keys=False,
+                allow_agent=False,
+                timeout=10
+            )
+
+            
+            target_channel = target_client.get_transport().open_session()
+            target_channel.exec_command(command)
+
+            # transfert petit a petit
+            while True:
+                # client -> serv
+                if channel.recv_ready():
+                    data = channel.recv(32768)
+                    if not data:
+                        break
+                    target_channel.sendall(data)
+
+                # serv -> client
+                if target_channel.recv_ready():
+                    data = target_channel.recv(32768)
+                    if not data:
+                        break
+                    channel.sendall(data)
+
+                # si erreur
+                if target_channel.recv_stderr_ready():
+                    data = target_channel.recv_stderr(32768)
+                    if data:
+                        channel.sendall_stderr(data)
+
+                
+                if target_channel.exit_status_ready():
+                    status = target_channel.recv_exit_status()
+                    channel.send_exit_status(status)
+                    
+                    target_channel.close()
+                    channel.close()
+                    break
+
+
+
+            if channel.get_transport():
+                channel.get_transport().close()
+            return True
+
+        except Exception as e:
+            if channel and not channel.exit_status_ready():
+                try:
+                    channel.send_exit_status(1)
+                except:
+                    pass
+            return True
+            
+        finally:
+            # cleanup
+            try:
+                if target_client:
+                    target_client.close()
+                if channel.get_transport():
+                    channel.get_transport().close()
+            except:
+                pass
+            return True
+
+    def run(self):
+
+        try:
+            
+            from proxy import SSHProxy
             transport = paramiko.Transport(self.client_sock)
             
             server_key = paramiko.RSAKey.from_private_key_file(SERVER_KEY_FILE)
@@ -93,7 +213,7 @@ class ProxySession(threading.Thread):
                 server.target_ip,
                 username=server.target_username,
                 password=server.target_password,
-                port=22
+                port=TARGET_SSH_PORT
             )
 
             self.client_username = server.target_username
@@ -104,25 +224,40 @@ class ProxySession(threading.Thread):
                 logging.error("No channel.")
                 return
             
-            self.target_chan = client.get_transport().open_session()
-            self.target_chan.get_pty(
-                term=self.term or 'xterm',
-                width=self.width,
-                height=self.height
-            )
-            self.target_chan.invoke_shell()
+            if hasattr(server, 'command'):
+                if server.command == "sftp":
+                    if self.handle_sftp_session(chan, server):
+                        transport.close()
+                        return
+                elif server.command and server.command.startswith('scp'):
+                    if self.handle_scp_session(chan, server.command, server):
+                        transport.close()
+                        return
+                else:
+                    if self.handle_scp_session(chan, server.command, server):
+                        transport.close()
+                        return
+            else:
+                self.target_chan = client.get_transport().open_session()
+                self.target_chan.get_pty(
+                    term=self.term or 'xterm',
+                    width=self.width,
+                    height=self.height
+                )
+                self.target_chan.invoke_shell()
 
-            vm_id = server.target_ip.split('.')[-1]
-            self.setup_session_logging(vm_id, server.target_username)
-            
-            self.forward_streams(chan, self.target_chan)
+                vm_id = server.target_ip.split('.')[-1]
+                self.setup_session_logging(vm_id, server.target_username)
+                
+                self.forward_streams(chan, self.target_chan)
             
         except Exception as e:
             logging.error(f"Error in proxy session: {e}")
-            raise
+        finally:
+            if transport:
+                transport.close()
 
     def forward_streams(self, chan, target_chan):
-        """Forward data between client and target channels while logging commands"""
         def forward_to_target(source, destination):
             try:
                 buff = ''
@@ -131,11 +266,8 @@ class ProxySession(threading.Thread):
                     if not data:
                         break
                         
-                    # Try to decode and log command when newline is detected
                     try:
                         char = data.decode('utf-8')
-                        
-                        # Handle Ctrl+C to clear buffer
                         if char == '\x03':  # ^C character
                             buff = ''
                             destination.send(data)
@@ -145,14 +277,12 @@ class ProxySession(threading.Thread):
 
                         if char == '\n' or char == '\r':
                             lines = buff.replace('\r', '\n').split('\n')
-                            buff = "" # Clear buffer
+                            buff = ""
                             for line in lines:
                                 line = line.strip()
-                                if line:  # Don't log empty lines
-                                    self.log_cmd(line);
+                                if line:
+                                    self.log_cmd(line)
                                     self.session_logger.info(f"Command: {line}")
-                                    # Hide this because of session_logger that already print cmd in terminal
-                                    # print(f"\033[93m[{datetime.now()}] User command: {line}\033[0m")
                     except UnicodeDecodeError:
                         pass
                         
@@ -172,7 +302,6 @@ class ProxySession(threading.Thread):
                 source.close()
                 destination.close()
 
-        # Start forwarding threads
         thread_c2t = threading.Thread(target=forward_to_target, args=(chan, target_chan))
         thread_t2c = threading.Thread(target=forward_to_client, args=(target_chan, chan))
         
