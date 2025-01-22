@@ -182,25 +182,22 @@ class ProxySession(threading.Thread):
             return True
 
     def run(self):
-
         try:
-            
             from proxy import SSHProxy
             transport = paramiko.Transport(self.client_sock)
-            
             server_key = paramiko.RSAKey.from_private_key_file(SERVER_KEY_FILE)
             transport.add_server_key(server_key)
-            
+
             server = SSHProxy(self.client_ip, self.db_connection)
             server.check_channel_pty_request = self.check_channel_pty_request
             server.check_channel_window_change_request = self.check_channel_window_change_request
-            
+
             try:
                 transport.start_server(server=server)
             except paramiko.SSHException as e:
                 logging.error(f"SSH negotiation failed: {e}")
                 return
-            
+
             server.event.wait(30)
             if not server.event.is_set():
                 logging.error("Client never asked for a shell")
@@ -223,21 +220,9 @@ class ProxySession(threading.Thread):
             if chan is None:
                 logging.error("No channel.")
                 return
-            
-            if hasattr(server, 'command'):
-                if server.command == "sftp":
-                    if self.handle_sftp_session(chan, server):
-                        transport.close()
-                        return
-                elif server.command and server.command.startswith('scp'):
-                    if self.handle_scp_session(chan, server.command, server):
-                        transport.close()
-                        return
-                else:
-                    if self.handle_scp_session(chan, server.command, server):
-                        transport.close()
-                        return
-            else:
+
+            # Modify the condition to specifically handle SSH shell
+            if not hasattr(server, 'command') or server.command is None:
                 self.target_chan = client.get_transport().open_session()
                 self.target_chan.get_pty(
                     term=self.term or 'xterm',
@@ -248,14 +233,25 @@ class ProxySession(threading.Thread):
 
                 vm_id = server.target_ip.split('.')[-1]
                 self.setup_session_logging(vm_id, server.target_username)
-                
                 self.forward_streams(chan, self.target_chan)
             
+            # Handle SFTP and SCP separately
+            elif server.command == "sftp":
+                if self.handle_sftp_session(chan, server):
+                    transport.close()
+                    return
+            elif server.command and server.command.startswith('scp'):
+                if self.handle_scp_session(chan, server.command, server):
+                    transport.close()
+                    return
+
         except Exception as e:
             logging.error(f"Error in proxy session: {e}")
         finally:
-            if transport:
+            if 'transport' in locals() and transport:
                 transport.close()
+
+
 
     def forward_streams(self, chan, target_chan):
         def forward_to_target(source, destination):
