@@ -196,6 +196,8 @@ class ProxySession(threading.Thread):
                 transport.start_server(server=server)
             except paramiko.SSHException as e:
                 logging.error(f"SSH negotiation failed: {e}")
+                transport.close()
+                self.client_sock.close()
                 return
 
             server.event.wait(30)
@@ -298,11 +300,11 @@ class ProxySession(threading.Thread):
                 source.close()
                 destination.close()
 
-        thread_c2t = threading.Thread(target=forward_to_target, args=(chan, target_chan))
-        thread_t2c = threading.Thread(target=forward_to_client, args=(target_chan, chan))
+        self.thread_c2t = threading.Thread(target=forward_to_target, args=(chan, target_chan))
+        self.thread_t2c = threading.Thread(target=forward_to_client, args=(target_chan, chan))
         
-        thread_c2t.start()
-        thread_t2c.start()
+        self.thread_c2t.start()
+        self.thread_t2c.start()
         
-        thread_c2t.join()
-        thread_t2c.join()
+        self.thread_c2t.join()
+        self.thread_t2c.join()
