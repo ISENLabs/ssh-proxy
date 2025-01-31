@@ -175,16 +175,8 @@ class ProxySession(threading.Thread):
             try:
                 buff = ''
                 while True:
-                    if chan.closed or target_chan.closed:
-                        break
-                    
-                    if not chan.recv_ready():
-                        if chan.exit_status_ready():
-                            break
-                        continue
-                        
                     data = chan.recv(self.SHELL_BUFFER_SIZE)
-                    if not data:
+                    if not data or chan.closed or target_chan.closed:
                         break
                     
                     try:
@@ -200,6 +192,8 @@ class ProxySession(threading.Thread):
                             if command:
                                 self.log_cmd(command)
                             buff = ''
+                            if command in ('exit', 'logout'):
+                                break
                     except UnicodeDecodeError:
                         pass
                         
@@ -207,34 +201,29 @@ class ProxySession(threading.Thread):
             except Exception as e:
                 logging.error(f"Forward to target error: {e}")
             finally:
-                chan.close()
-                target_chan.close()
+                try:
+                    chan.close()
+                    target_chan.close()
+                except:
+                    pass
 
         def forward_to_client():
             """Forward data from target to client."""
             try:
                 while True:
-                    if chan.closed or target_chan.closed:
-                        break
-                        
-                    if not target_chan.recv_ready():
-                        if target_chan.exit_status_ready():
-                            break
-                        continue
-                        
                     data = target_chan.recv(self.SHELL_BUFFER_SIZE)
-                    if not data:
+                    if not data or chan.closed or target_chan.closed:
                         break
-                        
-                    chan.send(data)
                     
-                    if target_chan.exit_status_ready():
-                        break
+                    chan.send(data)
             except Exception as e:
                 logging.error(f"Forward to client error: {e}")
             finally:
-                chan.close()
-                target_chan.close()
+                try:
+                    chan.close()
+                    target_chan.close()
+                except:
+                    pass
 
         return forward_to_target, forward_to_client
 
@@ -327,4 +316,4 @@ class ProxySession(threading.Thread):
                         resource.close()
                     except:
                         pass
-                    
+    
